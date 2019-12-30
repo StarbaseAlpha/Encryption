@@ -1,6 +1,6 @@
 {
   "name": "@starbase/encryption",
-  "version": "0.0.1",
+  "version": "0.1.0",
   "description": "Starbase Encryption",
   "main": "index.js",
   "scripts": {
@@ -26,6 +26,6 @@
   },
   "homepage": "https://github.com/starbasealpha/encryption#readme",
   "dependencies": {
-    "node-webcrypto-ossl": "^1.0.38"
+    "@starbase/cryptic":"latest"
   }
 }
