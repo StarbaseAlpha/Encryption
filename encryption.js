@@ -8,29 +8,10 @@ function Encryption(cryptic) {
 
   async function createUser() {
     let idk = await cryptic.createECDH();
-    let spk = await cryptic.createECDH();
-    let card = await createCard({idk, spk});
-    let opks = {};
     let user = {
-      idk,
-      spk,
-      opks,
-      card
+      idk
     };
     return cloneState(user);
-  }
-
-  async function updateSPK(user) {
-    let spk = await cryptic.createECDH();
-    return spk;
-  }
-
-  async function createCard(user) {
-    let card = {
-      "idk":user.idk.pub,
-      "spk":user.spk.pub,
-    };
-    return cloneState(card);
   }
 
   async function sessionHash(combinedDH, init) {
@@ -48,33 +29,21 @@ function Encryption(cryptic) {
     let init = {};
     init.to = card.idk;
     init.from = user.idk.pub.toString();
-    init.spk = card.spk;
     init.epk = epk.pub;
-    if (card.opk) {
-      init.opk = card.opk;
-    }
-    let dh1 = await cryptic.ecdh(user.idk.key, init.spk);
+    init.opk = card.opk;
+    let dh1 = await cryptic.ecdh(user.idk.key, init.opk);
     let dh2 = await cryptic.ecdh(epk.key, init.to);
-    let dh3 = await cryptic.ecdh(epk.key, init.spk);
-    let dh4 = null;
-    if (init.opk) {
-      dh4 = await cryptic.ecdh(epk.key, init.opk);
-    }
-    let combinedDH = await cryptic.combine(cryptic.combine(dh1, dh2), cryptic.combine(dh3, dh4));
+    let dh3 = await cryptic.ecdh(epk.key, init.opk);
+
+    let combinedDH = await cryptic.combine(cryptic.combine(dh1, dh2), cryptic.combine(dh3));
     return sessionHash(combinedDH, init);
   }
 
-  async function openSession(user, init) {
-    let dh1 = await cryptic.ecdh(user.spk.key, init.from);
+  async function openSession(user, opk, init) {
+    let dh1 = await cryptic.ecdh(opk, init.from);
     let dh2 = await cryptic.ecdh(user.idk.key, init.epk);
-    let dh3 = await cryptic.ecdh(user.spk.key, init.epk);
-    let dh4 = null;
-    if (init.opk && user.opks[init.opk]) {
-      let opk = user.opks[init.opk].toString();
-      delete user.opks[init.opk];
-      dh4 = await cryptic.ecdh(opk, init.epk);
-    }
-    let combinedDH = await cryptic.combine(cryptic.combine(dh1, dh2), cryptic.combine(dh3, dh4));
+    let dh3 = await cryptic.ecdh(opk, init.epk);
+    let combinedDH = await cryptic.combine(cryptic.combine(dh1, dh2), cryptic.combine(dh3));
     return sessionHash(combinedDH, init);
   }
 
@@ -94,7 +63,7 @@ function Encryption(cryptic) {
   async function createInitRatchet(session) {
     let state = {};
     state.DHs = await cryptic.createECDH();
-    state.DHr = session.init.spk;
+    state.DHr = session.init.opk;
     let dh = await cryptic.ecdh(state.DHs.key, state.DHr);
     [state.RK, state.CKs] = await rootKDF(session.sk, dh);
     state.CKr = null;
@@ -105,9 +74,9 @@ function Encryption(cryptic) {
     return state;
   }
 
-  async function openInitRatchet(session, spk) {
+  async function openInitRatchet(session, opk) {
     let state = {};
-    state.DHs = spk;
+    state.DHs = opk;
     state.DHr = null;
     state.RK = session.sk;
     state.CKs = null;
@@ -348,21 +317,10 @@ function Encryption(cryptic) {
       return userState;
     };
 
-    user.getCard = async (includeOPK=false) => {
-      let card = cloneState(userState.card);
-      if (includeOPK) {
-        let opk = await cryptic.createECDH();
-        userState.opks[opk.pub] = opk.key;
-        card.opk = opk.pub.toString();
-      }
-      return card;
-    };
-
-    user.updateSPK = async () => {
-      let spk = await updateSPK(userState);
-      userState.spk = spk;
-      userState.card = await createCard(userState);
-      return true;
+    user.createOPK = async () => {
+      let secret = await cryptic.createECDH();
+      let card = {"idk":userState.idk.pub, "opk":secret.pub};
+      return {card, secret};
     };
 
     user.sealEnvelope = async (to, msg) => {
@@ -381,11 +339,11 @@ function Encryption(cryptic) {
       return Session(session);
     };
 
-    user.openSession = async (init) => {
-      let session = await openSession(useUser(), init);
+    user.openSession = async (init, secretOPK) => {
+      let session = await openSession(useUser(), secretOPK.key, init);
       session.user = init.from;
       session.recvFrom = useUser().idk.pub.toString();
-      session.state = await openInitRatchet(session, useUser().spk);
+      session.state = await openInitRatchet(session, secretOPK);
       delete session.sk;
       return Session(session);
     };
@@ -396,6 +354,10 @@ function Encryption(cryptic) {
 
     user.save = () => {
       return cloneState(userState);
+    };
+
+    user.getID = () => {
+      return cloneState(userState).idk.pub;
     };
 
     return user;
