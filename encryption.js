@@ -1,54 +1,69 @@
-'use strict';
+"use strict";
 
 function Encryption(cryptic) {
-
   if (!cryptic) {
-    throw("An instance of Starbase Cryptic is require.");
+    throw "An instance of Starbase Cryptic is require.";
   }
 
   async function createUser() {
-    let idk = await cryptic.createECDH();
-    let user = {
-      idk
-    };
-    return cloneState(user);
-  }
-
-  async function sessionHash(combinedDH, init) {
-   let hashed = await cryptic.kdf(combinedDH, new Uint8Array(32), cryptic.fromText('SIGNAL'), 256 * 3);
-    let sharedKey = cryptic.decode(hashed).slice(0,32);
-    let authKey = cryptic.decode(hashed).slice(32,64);
-    let sessionId = cryptic.decode(hashed).slice(64, 96);
-    let ad = cryptic.combine(cryptic.decode(init.from),cryptic.decode(init.to));
-    let AD = await cryptic.kdf(cryptic.combine(authKey, ad), new Uint8Array(32), cryptic.fromText("AD"), 256);
-    return {"sessionId":cryptic.encode(sessionId), "sk":cryptic.encode(sharedKey), AD, init};
+    return cryptic.createECDH();
   }
 
   async function createSession(user, card) {
     let epk = await cryptic.createECDH();
-    let init = {};
-    init.to = card.idk;
-    init.from = user.idk.pub.toString();
-    init.epk = epk.pub;
-    init.opk = card.opk;
-    let dh1 = await cryptic.ecdh(user.idk.key, init.opk);
-    let dh2 = await cryptic.ecdh(epk.key, init.to);
-    let dh3 = await cryptic.ecdh(epk.key, init.opk);
-
-    let combinedDH = await cryptic.combine(cryptic.combine(dh1, dh2), cryptic.combine(dh3));
-    return sessionHash(combinedDH, init);
+    let dh1 = await cryptic.ecdh(user.key, card.opk);
+    let dh2 = await cryptic.ecdh(epk.key, card.user);
+    let dh3 = await cryptic.ecdh(epk.key, card.opk);
+    let combined = cryptic.combine(
+      cryptic.combine(cryptic.decode(dh1), cryptic.decode(dh2)),
+      cryptic.decode(dh3)
+    );
+    let sk = await cryptic.kdf(
+      combined,
+      new Uint8Array(32),
+      cryptic.fromText("SESSION"),
+      256
+    );
+    let AD = cryptic.encode(
+      cryptic.combine(cryptic.decode(user.pub), cryptic.decode(card.user))
+    );
+    let init = {
+      type: "init",
+      to: card.user,
+      from: user.pub,
+      epk: epk.pub,
+      opk: card.opk,
+    };
+    return { type: "session", user: card.user, sk, AD, init };
   }
 
   async function openSession(user, opk, init) {
-    let dh1 = await cryptic.ecdh(opk, init.from);
-    let dh2 = await cryptic.ecdh(user.idk.key, init.epk);
-    let dh3 = await cryptic.ecdh(opk, init.epk);
-    let combinedDH = await cryptic.combine(cryptic.combine(dh1, dh2), cryptic.combine(dh3));
-    return sessionHash(combinedDH, init);
+    let dh1 = await cryptic.ecdh(opk.key, init.from);
+    let dh2 = await cryptic.ecdh(user.key, init.epk);
+    let dh3 = await cryptic.ecdh(opk.key, init.epk);
+    let combined = cryptic.combine(
+      cryptic.combine(cryptic.decode(dh1), cryptic.decode(dh2)),
+      cryptic.decode(dh3)
+    );
+    let sk = await cryptic.kdf(
+      combined,
+      new Uint8Array(32),
+      cryptic.fromText("SESSION"),
+      256
+    );
+    let AD = cryptic.encode(
+      cryptic.combine(cryptic.decode(init.from), cryptic.decode(user.pub))
+    );
+    return { type: "session", user: init.from, sk, AD };
   }
 
   async function rootKDF(rk, dh) {
-    let ratchet = await cryptic.kdf(cryptic.decode(dh), cryptic.decode(rk), cryptic.fromText('ROOT'), 512);
+    let ratchet = await cryptic.kdf(
+      cryptic.decode(dh),
+      cryptic.decode(rk),
+      cryptic.fromText("ROOT"),
+      512
+    );
     let RK = cryptic.encode(cryptic.decode(ratchet).slice(0, 32));
     let CK = cryptic.encode(cryptic.decode(ratchet).slice(32));
     return [RK, CK];
@@ -91,13 +106,23 @@ function Encryption(cryptic) {
   async function trySkippedMessageKeys(state, header, ciphertext, AEAD) {
     if (state.MKSKIPPED[header.dh] && state.MKSKIPPED[header.dh][header.n]) {
       let mk = state.MKSKIPPED[header.dh][header.n];
-      let KEY = await cryptic.kdf(cryptic.combine(cryptic.decode(mk), cryptic.fromText(JSON.stringify(header))), new Uint8Array(32), cryptic.fromText("ENCRYPT"), 256);
-      let plaintext = await cryptic.decrypt(ciphertext, cryptic.decode(KEY), cryptic.decode(AEAD)).catch(err => {
-        return null;
-      });
+      let KEY = await cryptic.kdf(
+        cryptic.combine(
+          cryptic.decode(mk),
+          cryptic.fromText(JSON.stringify(header))
+        ),
+        new Uint8Array(32),
+        cryptic.fromText("ENCRYPT"),
+        256
+      );
+      let plaintext = await cryptic
+        .decrypt(ciphertext, cryptic.decode(KEY), cryptic.decode(AEAD))
+        .catch((err) => {
+          return null;
+        });
       if (plaintext) {
         delete state.MKSKIPPED[header.dh][header.n];
-        return {"header":header, "plaintext":plaintext};
+        return { header: header, plaintext: plaintext };
       } else {
         return null;
       }
@@ -107,7 +132,7 @@ function Encryption(cryptic) {
   async function skipMessageKeys(state, until, maxSkip) {
     if (state.Nr + maxSkip < until) {
       return Promise.reject({
-        "message": "Too many skipped messages!"
+        message: "Too many skipped messages!",
       });
     }
     if (state.CKr) {
@@ -140,16 +165,36 @@ function Encryption(cryptic) {
     let mk = null;
     [state.CKs, mk] = await chainKDF(state.CKs, state);
     let header = {
-      "dh": state.DHs.pub,
-      "pn": state.PN,
-      "n": state.Ns
+      dh: state.DHs.pub,
+      pn: state.PN,
+      n: state.Ns,
     };
     state.Ns += 1;
-    let AEAD = await cryptic.kdf(cryptic.combine(cryptic.decode(AD), cryptic.fromText(JSON.stringify(header))), new Uint8Array(32), cryptic.fromText("AEAD"), 256);
-    let KEY = await cryptic.kdf(cryptic.combine(cryptic.decode(mk), cryptic.fromText(JSON.stringify(header))), new Uint8Array(32), cryptic.fromText("ENCRYPT"), 256);
+    let AEAD = await cryptic.kdf(
+      cryptic.combine(
+        cryptic.decode(AD),
+        cryptic.fromText(JSON.stringify(header))
+      ),
+      new Uint8Array(32),
+      cryptic.fromText("AEAD"),
+      256
+    );
+    let KEY = await cryptic.kdf(
+      cryptic.combine(
+        cryptic.decode(mk),
+        cryptic.fromText(JSON.stringify(header))
+      ),
+      new Uint8Array(32),
+      cryptic.fromText("ENCRYPT"),
+      256
+    );
     let encrypted = {
       header,
-      "ciphertext": await cryptic.encrypt(JSON.stringify(msg), cryptic.decode(KEY), cryptic.decode(AEAD))
+      ciphertext: await cryptic.encrypt(
+        JSON.stringify(msg),
+        cryptic.decode(KEY),
+        cryptic.decode(AEAD)
+      ),
     };
     if (init) {
       encrypted.init = cloneState(init);
@@ -158,12 +203,22 @@ function Encryption(cryptic) {
   }
 
   async function ratchetDecrypt(state, msgPayload = {}, AD, maxSkip = 10) {
-    let {
+    let { header, ciphertext } = msgPayload;
+    let AEAD = await cryptic.kdf(
+      cryptic.combine(
+        cryptic.decode(AD),
+        cryptic.fromText(JSON.stringify(header))
+      ),
+      new Uint8Array(32),
+      cryptic.fromText("AEAD"),
+      256
+    );
+    let found = await trySkippedMessageKeys(
+      state,
       header,
-      ciphertext
-    } = msgPayload;
-    let AEAD = await cryptic.kdf(cryptic.combine(cryptic.decode(AD), cryptic.fromText(JSON.stringify(header))), new Uint8Array(32), cryptic.fromText("AEAD"), 256);
-    let found = await trySkippedMessageKeys(state, header, ciphertext, AEAD || null);
+      ciphertext,
+      AEAD || null
+    );
     if (found) {
       return found;
     }
@@ -175,22 +230,32 @@ function Encryption(cryptic) {
     let mk = null;
     [state.CKr, mk] = await chainKDF(state.CKr);
     state.Nr += 1;
-    let KEY = await cryptic.kdf(cryptic.combine(cryptic.decode(mk), cryptic.fromText(JSON.stringify(header))), new Uint8Array(32), cryptic.fromText("ENCRYPT"), 256);
-    let plaintext = await cryptic.decrypt(ciphertext, cryptic.decode(KEY), cryptic.decode(AEAD)).catch(err => {
-      throw ({
-        "error": "failed to decrypt"
+    let KEY = await cryptic.kdf(
+      cryptic.combine(
+        cryptic.decode(mk),
+        cryptic.fromText(JSON.stringify(header))
+      ),
+      new Uint8Array(32),
+      cryptic.fromText("ENCRYPT"),
+      256
+    );
+    let plaintext = await cryptic
+      .decrypt(ciphertext, cryptic.decode(KEY), cryptic.decode(AEAD))
+      .catch((err) => {
+        throw {
+          error: "failed to decrypt",
+        };
       });
-    });
     delete state.init;
     return {
       header,
-      "plaintext":JSON.parse(plaintext)
+      plaintext: JSON.parse(plaintext),
     };
   }
 
   function cloneState(src) {
     let target = {};
-    if (typeof src === 'string') {
+    if (typeof src === "string") {
       target = src.toString();
       return target;
     }
@@ -198,7 +263,7 @@ function Encryption(cryptic) {
       target = [];
     }
     for (let prop in src) {
-      if (src[prop] && typeof src[prop] === 'object') {
+      if (src[prop] && typeof src[prop] === "object") {
         target[prop] = cloneState(src[prop]);
       } else {
         target[prop] = src[prop];
@@ -207,55 +272,73 @@ function Encryption(cryptic) {
     return target;
   }
 
-  async function sealEnvelope(userIDK, to, message) {
-    let idk = userIDK.pub;
-    let env = {};
-    let epk = await cryptic.createECDH();
-
-    let dh1 = await cryptic.ecdh(epk.key, to);
-    let envSalt = cryptic.combine(cryptic.decode(to), cryptic.decode(epk.pub));
-    let envBits = await cryptic.kdf(cryptic.decode(dh1), envSalt, cryptic.fromText("ENVELOPE"), 256 * 3);
-    let envAD = cryptic.combine(cryptic.decode(envBits).slice(0, 32), cryptic.combine(cryptic.decode(epk.pub), cryptic.decode(to)));
-    let envKey = cryptic.decode(envBits).slice(32, 64);
-    let envChain = cryptic.decode(envBits).slice(64, 96);
-
-    let sealed = await cryptic.encrypt(idk, envKey, envAD);
-
-    let dh2 = await cryptic.ecdh(userIDK.key, to)
-    let sealSalt = cryptic.combine(envChain, cryptic.fromText(sealed));
-    let sealBits = await cryptic.kdf(cryptic.decode(dh2), cryptic.combine(sealSalt, cryptic.decode(idk)), cryptic.fromText("SEAL"), 256 * 2);
-    let sealAD = cryptic.combine(cryptic.decode(sealBits).slice(0, 32), cryptic.decode(to));
-    let sealKey = cryptic.decode(sealBits).slice(32, 64); 
-
-    env.to = to;
-    env.epk = epk.pub;
-    env.seal = sealed;
-
-    env.ciphertext = await cryptic.encrypt(JSON.stringify(message), sealKey, sealAD);
-    return env;
+  async function sealEnvelope(user, to, message) {
+    let ek = await cryptic.createECDH();
+    let dh1 = await cryptic.ecdh(ek.key, to);
+    let sbits = await cryptic.kdf(
+      cryptic.decode(dh1),
+      new Uint8Array(32),
+      cryptic.fromText("SEAL"),
+      512
+    );
+    let sealkey = cryptic.decode(sbits).slice(0, 32);
+    let chainkey = cryptic.decode(sbits).slice(32, 64);
+    let sealAD = cryptic.combine(cryptic.decode(ek.pub), cryptic.decode(to));
+    let seal = await cryptic.encrypt(user.pub, sealkey, sealAD);
+    let dh2 = await cryptic.ecdh(user.key, to);
+    let mbits = await cryptic.kdf(
+      cryptic.decode(dh2),
+      chainkey,
+      cryptic.fromText("MESSAGE"),
+      256
+    );
+    let msgkey = cryptic.decode(mbits);
+    let msgAD = cryptic.combine(cryptic.decode(user.pub), cryptic.decode(to));
+    let ciphertext = await cryptic.encrypt(
+      JSON.stringify(message),
+      msgkey,
+      msgAD
+    );
+    return {
+      type: "envelope",
+      to: to,
+      ek: ek.pub,
+      seal: seal,
+      ciphertext: ciphertext,
+    };
   }
 
-  async function openEnvelope(userIDK, env) {
-    let idk = userIDK.pub;
-    let epk = env.epk;
-
-    let dh1 = await cryptic.ecdh(userIDK.key, epk);
-    let envSalt = cryptic.combine(cryptic.decode(idk), cryptic.decode(epk));
-    let envBits = await cryptic.kdf(cryptic.decode(dh1), envSalt, cryptic.fromText("ENVELOPE"), 256 * 3);
-    let envAD = cryptic.combine(cryptic.decode(envBits).slice(0, 32), cryptic.combine(cryptic.decode(epk), cryptic.decode(idk)));
-    let envKey = cryptic.decode(envBits).slice(32, 64);
-    let envChain = cryptic.decode(envBits).slice(64, 96);
-
-    let from = await cryptic.decrypt(env.seal, envKey, envAD);
-
-    let dh2 = await cryptic.ecdh(userIDK.key, from);
-    let sealSalt = cryptic.combine(envChain, cryptic.fromText(env.seal));
-    let sealBits = await cryptic.kdf(cryptic.decode(dh2), cryptic.combine(sealSalt, cryptic.decode(from)), cryptic.fromText("SEAL"), 256 * 2);
-    let sealAD = cryptic.combine(cryptic.decode(sealBits).slice(0, 32), cryptic.decode(idk));
-    let sealKey = cryptic.decode(sealBits).slice(32, 64);
-
-    let contents = await cryptic.decrypt(env.ciphertext, sealKey, sealAD);
-    return {"from": from, "contents": JSON.parse(contents)};
+  async function openEnvelope(user, envelope) {
+    let dh1 = await cryptic.ecdh(user.key, envelope.ek);
+    let sbits = await cryptic.kdf(
+      cryptic.decode(dh1),
+      new Uint8Array(32),
+      cryptic.fromText("SEAL"),
+      512
+    );
+    let sealkey = cryptic.decode(sbits).slice(0, 32);
+    let chainkey = cryptic.decode(sbits).slice(32, 64);
+    let sealAD = cryptic.combine(
+      cryptic.decode(envelope.ek),
+      cryptic.decode(user.pub)
+    );
+    let from = await cryptic.decrypt(envelope.seal, sealkey, sealAD);
+    let dh2 = await cryptic.ecdh(user.key, from);
+    let mbits = await cryptic.kdf(
+      cryptic.decode(dh2),
+      chainkey,
+      cryptic.fromText("MESSAGE"),
+      256
+    );
+    let msgkey = cryptic.decode(mbits);
+    let msgAD = cryptic.combine(cryptic.decode(from), cryptic.decode(user.pub));
+    let decrypted = await cryptic.decrypt(envelope.ciphertext, msgkey, msgAD);
+    return {
+      type: "envelope",
+      to: envelope.to,
+      from: from,
+      plaintext: JSON.parse(decrypted),
+    };
   }
 
   function Session(sessionData) {
@@ -268,7 +351,12 @@ function Encryption(cryptic) {
 
     session.send = async (message) => {
       let state = cloneState(sessionState.state);
-      let payload = await ratchetEncrypt(state, message, sessionState.AD||null, sessionState.init||null);
+      let payload = await ratchetEncrypt(
+        state,
+        message,
+        sessionState.AD || null,
+        sessionState.init || null
+      );
       payload.to = sessionData.user.toString();
       sessionState.state = cloneState(state);
       return payload;
@@ -276,22 +364,27 @@ function Encryption(cryptic) {
 
     session.read = async (payload) => {
       let state = cloneState(sessionState.state);
-      let decrypted = await ratchetDecrypt(state, payload, sessionState.AD||null);
+      let decrypted = await ratchetDecrypt(
+        state,
+        payload,
+        sessionState.AD || null
+      );
       if (sessionState.init) {
         delete sessionState.init;
       }
-      let msg = {"header": payload.header, "plaintext":decrypted.plaintext, "from": session.to()};
+      let msg = {
+        header: payload.header,
+        plaintext: decrypted.plaintext,
+        from: session.to(),
+      };
       sessionState.state = cloneState(state);
       return msg;
     };
 
     session.save = () => {
       let backup = {
-        "state":cloneState(sessionState.state)
+        state: cloneState(sessionState.state),
       };
-      if (sessionState.sessionId) {
-        backup.sessionId = cloneState(sessionState.sessionId);
-      }
       if (sessionState.init) {
         backup.init = cloneState(sessionState.init);
       }
@@ -305,11 +398,9 @@ function Encryption(cryptic) {
     };
 
     return session;
-
   }
 
   function User(userData) {
-
     let userState = cloneState(userData);
     let user = {};
 
@@ -319,30 +410,27 @@ function Encryption(cryptic) {
 
     user.createOPK = async () => {
       let secret = await cryptic.createECDH();
-      let card = {"idk":userState.idk.pub, "opk":secret.pub};
-      return {card, secret};
+      let card = { user: userState.pub, opk: secret.pub };
+      return { card, secret };
     };
 
     user.sealEnvelope = async (to, msg) => {
-      return sealEnvelope(useUser().idk, to, msg);
+      return sealEnvelope(useUser(), to, msg);
     };
 
     user.openEnvelope = async (env) => {
-      return openEnvelope(useUser().idk, env);    
+      return openEnvelope(useUser(), env);
     };
 
     user.createSession = async (card) => {
       let session = await createSession(useUser(), card);
-      session.user = card.idk;
       session.state = await createInitRatchet(session);
       delete session.sk;
       return Session(session);
     };
 
     user.openSession = async (init, secretOPK) => {
-      let session = await openSession(useUser(), secretOPK.key, init);
-      session.user = init.from;
-      session.recvFrom = useUser().idk.pub.toString();
+      let session = await openSession(useUser(), secretOPK, init);
       session.state = await openInitRatchet(session, secretOPK);
       delete session.sk;
       return Session(session);
@@ -357,13 +445,16 @@ function Encryption(cryptic) {
     };
 
     user.getID = () => {
-      return cloneState(userState).idk.pub;
+      return cloneState(userState).pub;
     };
 
     return user;
   }
 
   let cynops = {};
+
+  cynops.cloneState = cloneState;
+  cynops.cryptic = cryptic;
 
   cynops.createUser = async () => {
     let userData = await createUser();
@@ -375,10 +466,9 @@ function Encryption(cryptic) {
   };
 
   return cynops;
-
 }
 
 // if is node module
-if (typeof module !== 'undefined' && module && module.exports) {
+if (typeof module !== "undefined" && module && module.exports) {
   module.exports = Encryption;
 }

@@ -9,9 +9,11 @@ const cynops = Cynops(cryptic);
 async function Test(cynops) {
 
   let alice = await cynops.createUser();
+  let saveAlice = alice.save();
   let aliceID = alice.getID();
 
   let bob = await cynops.createUser();
+  let saveBob = bob.save();
   let bobID = bob.getID();
 
   let bobOPK = await bob.createOPK(true);
@@ -26,24 +28,24 @@ async function Test(cynops) {
 
   let sealA1 = await alice.sealEnvelope(msgA1.to, msgA1);
   let openA1 = await bob.openEnvelope(sealA1);
-  let sessionB = await bob.openSession(openA1.contents.init, bobOPK.secret);
-  let readA1 = await sessionB.read(openA1.contents);
+  let sessionB = await bob.openSession(openA1.plaintext.init, bobOPK.secret);
+  let readA1 = await sessionB.read(openA1.plaintext);
   let openA0 = await bob.openEnvelope(sealA0);
-  let readA0 = await sessionB.read(openA0.contents);
+  let readA0 = await sessionB.read(openA0.plaintext);
 
   let msgB0 = await sessionB.send('Yep, I get it. Thanks, Alice!');
   let sealB0 = await bob.sealEnvelope(msgB0.to, msgB0);
 
   let openB0 = await alice.openEnvelope(sealB0);
-  let readB0 = await sessionA.read(openB0.contents);
+  let readB0 = await sessionA.read(openB0.plaintext);
 
   let msgA2 = await sessionA.send("You're welcome!");
   let sealA2 = await alice.sealEnvelope(msgA2.to, msgA2);
 
   let openA2 = await bob.openEnvelope(sealA2);
-  let readA2 = await sessionB.read(openA2.contents);
+  let readA2 = await sessionB.read(openA2.plaintext);
 
-  return {alice, aliceID, bob, bobID, bobOPK, sessionA, msgA0, sealA0, msgA1, sealA1, sessionB, openA0, readA0, openA1, readA1, msgB0, sealB0, openB0, readB0, msgA2, sealA2, openA2, readA2};
+  return {alice, saveAlice, aliceID, bob, saveBob, bobID, bobOPK, sessionA, msgA0, sealA0, msgA1, sealA1, sessionB, openA0, readA0, openA1, readA1, msgB0, sealB0, openB0, readB0, msgA2, sealA2, openA2, readA2, "cloneState":cynops.cloneState, "cryptic":cynops.cryptic};
 
 }
 
